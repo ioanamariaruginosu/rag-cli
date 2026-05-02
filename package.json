@@ -1,18 +1,33 @@
 {
-  "name": "rag-project",
-  "version": "1.0.0",
-  "main": "index.js",
+  "name": "ask-ai-pdf",
+  "version": "0.1.0",
+  "description": "RAG CLI to ask questions about PDFs in any folder using OpenAI.",
   "type": "module",
   "bin": {
-    "ask-ai": "./cli.ts"
+    "ask-ai": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsup",
+    "dev": "tsx cli.ts",
+    "prepublishOnly": "npm run build"
   },
-  "keywords": [],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "rag",
+    "cli",
+    "pdf",
+    "openai",
+    "langchain",
+    "ai"
+  ],
   "author": "",
-  "license": "ISC",
-  "description": "",
+  "license": "MIT",
   "dependencies": {
     "@langchain/classic": "^1.0.25",
     "@langchain/community": "^1.1.25",
@@ -24,6 +39,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
+    "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
