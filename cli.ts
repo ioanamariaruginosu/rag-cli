@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -46,6 +47,37 @@ async function ensureApiKey() {
     console.log(`✅ Key saved.\n`);
 }
 
+type CacheEntry = { hash: string; chunkCount: number; embeddings: number[][]; summary?: string };
+type CacheFile = { model: string; chunkSize: number; chunkOverlap: number; files: Record<string, CacheEntry> };
+
+function getCachePath(folder: string): string {
+    const folderHash = crypto.createHash("sha256").update(folder).digest("hex").slice(0, 16);
+    return path.join(os.homedir(), ".config", "ask-ai-pdf", "cache", `${folderHash}.json`);
+}
+
+function loadCache(cachePath: string, model: string, chunkSize: number, chunkOverlap: number): CacheFile {
+    const empty: CacheFile = { model, chunkSize, chunkOverlap, files: {} };
+    if (!fs.existsSync(cachePath)) return empty;
+    try {
+        const parsed = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+        if (parsed.model !== model || parsed.chunkSize !== chunkSize || parsed.chunkOverlap !== chunkOverlap) {
+            return empty; // embedding params changed, cached vectors are no longer comparable
+        }
+        return parsed;
+    } catch {
+        return empty;
+    }
+}
+
+function saveCache(cachePath: string, cache: CacheFile) {
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    fs.writeFileSync(cachePath, JSON.stringify(cache));
+}
+
+function hashFile(filePath: string): string {
+    return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
 function startSpinner(label: string) {
     const frames = [".  ", ".. ", "..."];
     let i = 0;
@@ -67,7 +99,7 @@ async function run() {
     const args = process.argv.slice(2);
     const specificFile = args[0];
 
-    type LoadedFile = { filename: string; pages: any[] };
+    type LoadedFile = { filename: string; pages: any[]; hash: string };
     const loadedFiles: LoadedFile[] = [];
 
     console.log(`\n🔍 Scanning files in: ${currentFolder}...`);
@@ -90,10 +122,11 @@ async function run() {
     for (const file of targets) {
         const filePath = path.join(currentFolder, file);
         try {
+            const hash = hashFile(filePath);
             const loader = new PDFLoader(filePath);
             const pages = await loader.load();
             pages.forEach(p => { p.metadata.source = file; });
-            loadedFiles.push({ filename: file, pages });
+            loadedFiles.push({ filename: file, pages, hash });
         } catch (error: any) {
             console.error(`⚠️  Skipping ${file}: ${error.message}`);
         }
@@ -105,32 +138,61 @@ async function run() {
     }
     console.log(`📂 Loaded ${loadedFiles.length} PDF(s).`);
 
-    const docs = loadedFiles.flatMap(f => f.pages);
+    const CHUNK_SIZE = 1000;
+    const CHUNK_OVERLAP = 200;
+    const embeddings = new OpenAIEmbeddings();
+    const cachePath = getCachePath(currentFolder);
+    const cache = loadCache(cachePath, embeddings.model, CHUNK_SIZE, CHUNK_OVERLAP);
+    let cacheDirty = false;
 
     const stopIndex = startSpinner("🧠 Building local database");
-    let vectorStore: MemoryVectorStore;
+    const vectorStore = new MemoryVectorStore(embeddings);
+    let cacheHits = 0;
     try {
-        const textSplitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
-        const chunkedDocs = await textSplitter.splitDocuments(docs);
-        vectorStore = await MemoryVectorStore.fromDocuments(chunkedDocs, new OpenAIEmbeddings());
+        const textSplitter = new RecursiveCharacterTextSplitter({ chunkSize: CHUNK_SIZE, chunkOverlap: CHUNK_OVERLAP });
+        for (const f of loadedFiles) {
+            const chunkedDocs = await textSplitter.splitDocuments(f.pages);
+            const cached = cache.files[f.filename];
+            const canReuse = cached && cached.hash === f.hash && cached.chunkCount === chunkedDocs.length;
+
+            if (canReuse) {
+                cacheHits++;
+                await vectorStore.addVectors(cached.embeddings, chunkedDocs);
+            } else {
+                const texts = chunkedDocs.map(d => d.pageContent);
+                const vectors = await embeddings.embedDocuments(texts);
+                await vectorStore.addVectors(vectors, chunkedDocs);
+                cache.files[f.filename] = { hash: f.hash, chunkCount: chunkedDocs.length, embeddings: vectors };
+                cacheDirty = true;
+            }
+        }
     } catch (error: any) {
         stopIndex();
         console.error(`❌ Error building database: ${error.message}`);
         process.exit(1);
     }
     stopIndex();
-    console.log("🧠 Database ready.");
+    console.log(`🧠 Database ready. (${cacheHits}/${loadedFiles.length} from cache)`);
 
     const summaryLLM = new ChatOpenAI({ modelName: "gpt-4o-mini", temperature: 0 });
     const stopSum = startSpinner(`📝 Summarizing ${loadedFiles.length} PDF(s)`);
     let summaries: { filename: string; summary: string }[];
     try {
         summaries = await Promise.all(loadedFiles.map(async f => {
+            const cached = cache.files[f.filename];
+            if (cached && cached.hash === f.hash && cached.summary) {
+                return { filename: f.filename, summary: cached.summary };
+            }
             const text = f.pages.map(p => p.pageContent).join("\n").slice(0, 6000);
             const result = await summaryLLM.invoke(
                 `Summarize what this PDF is about in 5-12 words. Reply with the summary only, no preamble or quotes.\n\nFilename: ${f.filename}\n\nContent:\n${text}`
             );
-            return { filename: f.filename, summary: String(result.content).trim() };
+            const summary = String(result.content).trim();
+            if (cache.files[f.filename]) {
+                cache.files[f.filename].summary = summary;
+                cacheDirty = true;
+            }
+            return { filename: f.filename, summary };
         }));
     } catch (error: any) {
         stopSum();
@@ -139,6 +201,8 @@ async function run() {
     }
     stopSum();
     console.log("📝 Summaries ready.");
+
+    if (cacheDirty) saveCache(cachePath, cache);
 
     const fileList = summaries.map(s => `- ${s.filename}: ${s.summary}`).join("\n");
     const fileCount = loadedFiles.length;

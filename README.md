@@ -67,7 +67,12 @@ Roughly:
 - ~$0.001 per PDF for the startup summary.
 - ~$0.01–0.05 per question for the answer (depends on excerpt size).
 
-The vector index is in-memory only, so re-running re-embeds everything.
+Embeddings and summaries are cached on disk at `~/.config/ask-ai-pdf/cache/`,
+keyed by folder and per-file content hash. Re-running on the same folder
+only re-embeds files that changed; unchanged files load instantly from
+cache at no extra cost. The vector index itself is rebuilt in memory each
+run from the cache, so startup is fast but nothing is kept resident between
+runs.
 
 ## Requirements
 
