@@ -72,46 +72,71 @@ async function run() {
 
     console.log(`\n🔍 Scanning files in: ${currentFolder}...`);
 
+    let targets: string[];
     try {
-        const targets = specificFile
+        targets = specificFile
             ? [specificFile]
             : fs.readdirSync(currentFolder).filter(f => f.toLowerCase().endsWith(".pdf"));
+    } catch (error: any) {
+        console.error(`❌ Error reading directory: ${error.message}`);
+        process.exit(1);
+    }
 
-        if (targets.length === 0) {
-            throw new Error("No PDFs found in this directory.");
-        }
+    if (targets.length === 0) {
+        console.error("❌ No PDFs found in this directory.");
+        process.exit(1);
+    }
 
-        for (const file of targets) {
-            const filePath = path.join(currentFolder, file);
+    for (const file of targets) {
+        const filePath = path.join(currentFolder, file);
+        try {
             const loader = new PDFLoader(filePath);
             const pages = await loader.load();
             pages.forEach(p => { p.metadata.source = file; });
             loadedFiles.push({ filename: file, pages });
+        } catch (error: any) {
+            console.error(`⚠️  Skipping ${file}: ${error.message}`);
         }
-        console.log(`📂 Loaded ${loadedFiles.length} PDF(s).`);
-    } catch (error: any) {
-        console.error(`❌ Error loading files: ${error.message}`);
+    }
+
+    if (loadedFiles.length === 0) {
+        console.error("❌ No PDFs could be loaded.");
         process.exit(1);
     }
+    console.log(`📂 Loaded ${loadedFiles.length} PDF(s).`);
 
     const docs = loadedFiles.flatMap(f => f.pages);
 
     const stopIndex = startSpinner("🧠 Building local database");
-    const textSplitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
-    const chunkedDocs = await textSplitter.splitDocuments(docs);
-    const vectorStore = await MemoryVectorStore.fromDocuments(chunkedDocs, new OpenAIEmbeddings());
+    let vectorStore: MemoryVectorStore;
+    try {
+        const textSplitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
+        const chunkedDocs = await textSplitter.splitDocuments(docs);
+        vectorStore = await MemoryVectorStore.fromDocuments(chunkedDocs, new OpenAIEmbeddings());
+    } catch (error: any) {
+        stopIndex();
+        console.error(`❌ Error building database: ${error.message}`);
+        process.exit(1);
+    }
     stopIndex();
     console.log("🧠 Database ready.");
 
     const summaryLLM = new ChatOpenAI({ modelName: "gpt-4o-mini", temperature: 0 });
     const stopSum = startSpinner(`📝 Summarizing ${loadedFiles.length} PDF(s)`);
-    const summaries = await Promise.all(loadedFiles.map(async f => {
-        const text = f.pages.map(p => p.pageContent).join("\n").slice(0, 6000);
-        const result = await summaryLLM.invoke(
-            `Summarize what this PDF is about in 5-12 words. Reply with the summary only, no preamble or quotes.\n\nFilename: ${f.filename}\n\nContent:\n${text}`
-        );
-        return { filename: f.filename, summary: String(result.content).trim() };
-    }));
+    let summaries: { filename: string; summary: string }[];
+    try {
+        summaries = await Promise.all(loadedFiles.map(async f => {
+            const text = f.pages.map(p => p.pageContent).join("\n").slice(0, 6000);
+            const result = await summaryLLM.invoke(
+                `Summarize what this PDF is about in 5-12 words. Reply with the summary only, no preamble or quotes.\n\nFilename: ${f.filename}\n\nContent:\n${text}`
+            );
+            return { filename: f.filename, summary: String(result.content).trim() };
+        }));
+    } catch (error: any) {
+        stopSum();
+        console.error(`❌ Error generating summaries: ${error.message}`);
+        process.exit(1);
+    }
     stopSum();
     console.log("📝 Summaries ready.");
 
@@ -140,11 +165,21 @@ Instructions:
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     console.log("\n💬 RAG CLI Active. Type your question (or 'exit' to quit):");
 
+    let activeStopSpinner: (() => void) | null = null;
+    process.on("SIGINT", () => {
+        activeStopSpinner?.();
+        console.log("\n👋 Goodbye.");
+        rl.close();
+        process.exit(0);
+    });
+
     while (true) {
-        const question = await rl.question("\nYou: ");
+        const question = (await rl.question("\nYou: ")).trim();
+        if (question === "") continue;
         if (question.toLowerCase() === "exit") break;
 
         const stop = startSpinner("AI is thinking");
+        activeStopSpinner = stop;
         try {
             const retrieved = await retriever.invoke(question);
             const context = retrieved

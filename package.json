@@ -26,8 +26,16 @@
     "langchain",
     "ai"
   ],
-  "author": "",
+  "author": "ioanaruginosu",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ioanamariaruginosu/rag-cli.git"
+  },
+  "homepage": "https://github.com/ioanamariaruginosu/rag-cli#readme",
+  "bugs": {
+    "url": "https://github.com/ioanamariaruginosu/rag-cli/issues"
+  },
   "dependencies": {
     "@langchain/classic": "^1.0.25",
     "@langchain/community": "^1.1.25",
@@ -42,5 +50,8 @@
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
+  },
+  "overrides": {
+    "pdf-parse": "^1.1.4"
   }
 }
